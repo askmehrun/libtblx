@@ -7,8 +7,7 @@
 - a **C shared library** (`./clib` → `libtblx.so`, built with `-buildmode=c-shared`)
 - a **Python binding** (`./python/tblx.py`) that drives the C library via ctypes
 
-The [tblx CLI](https://github.com/askmehrun/tblx) and the
-[VS Code extension](https://github.com/askmehrun/tblx/tree/main/vsx) are
+The [tblx CLI](https://github.com/askmehrun/tblx) is
 built around this module; the Python binding calls the *same compiled Go
 code*, so every language produces byte-identical files.
 
