@@ -1,0 +1,12 @@
+# shared library build artifacts
+*.so
+*.dylib
+*.dll
+libtblx.h
+
+# python
+__pycache__/
+*.pyc
+
+# misc
+.DS_Store
