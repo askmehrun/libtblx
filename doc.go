@@ -7,6 +7,7 @@
 //	column defs: name_len u8 · name · type u8 · flags u8 (=0)
 //	length array: col_count × u64          ← the seek index
 //	data blocks: one per column, back-to-back
+//	tail magic "XLBT" (4 B)                ← truncation detection
 //
 // Little-endian throughout, no padding, no NULLs (missing values are
 // stored as 0 / 0.0 / ""). The complete spec lives in the project wiki
@@ -34,6 +35,10 @@ package tblx
 // Magic is the 4-byte ASCII signature that begins every TBLX file:
 // 0x54 0x42 0x4C 0x58.
 const Magic = "TBLX"
+
+// TailMagic is the 4-byte ASCII signature appended at the end of every
+// TBLX file to detect truncation on read.
+const TailMagic = "XLBT"
 
 // Version is the library / format revision.
 const Version = "1.0.0"

@@ -55,15 +55,18 @@ func encodeInt(w io.Writer, v any) error {
 	default:
 		return fmt.Errorf("value %v is %T, want int64", v, v)
 	}
-	return binary.Write(w, binary.LittleEndian, iv)
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(iv))
+	_, err := w.Write(buf)
+	return err
 }
 
 func decodeInt(r io.Reader) (any, error) {
-	var v int64
-	if err := binary.Read(r, binary.LittleEndian, &v); err != nil {
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
-	return v, nil
+	return int64(binary.LittleEndian.Uint64(buf)), nil
 }
 
 // ---- float ---------------------------------------------------------------
@@ -82,15 +85,18 @@ func encodeFloat(w io.Writer, v any) error {
 	default:
 		return fmt.Errorf("value %v is %T, want float64", v, v)
 	}
-	return binary.Write(w, binary.LittleEndian, fv)
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, math.Float64bits(fv))
+	_, err := w.Write(buf)
+	return err
 }
 
 func decodeFloat(r io.Reader) (any, error) {
-	var v float64
-	if err := binary.Read(r, binary.LittleEndian, &v); err != nil {
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
-	return v, nil
+	return math.Float64frombits(binary.LittleEndian.Uint64(buf)), nil
 }
 
 // ---- string ---------------------------------------------------------------
@@ -103,7 +109,9 @@ func encodeString(w io.Writer, v any) error {
 	if uint64(len(s)) > math.MaxUint32 {
 		return fmt.Errorf("string of %d bytes exceeds the uint32 length limit", len(s))
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, uint32(len(s)))
+	if _, err := w.Write(buf); err != nil {
 		return err
 	}
 	_, err := io.WriteString(w, s)
@@ -111,13 +119,14 @@ func encodeString(w io.Writer, v any) error {
 }
 
 func decodeString(r io.Reader) (any, error) {
-	var n uint32
-	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
-		return nil, err
-	}
-	buf := make([]byte, n)
+	buf := make([]byte, 4)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
-	return string(buf), nil
+	n := binary.LittleEndian.Uint32(buf)
+	data := make([]byte, n)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, err
+	}
+	return string(data), nil
 }

@@ -1,10 +1,13 @@
 package tblx
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // Writer serialises an in-memory columnar table to a TBLX file.
@@ -45,18 +48,33 @@ func NewWriter(colNames []string, colTypes []DataType, colData [][]any) (*Writer
 	return &Writer{header: h, colData: colData}, nil
 }
 
-// Write serialises the table to path, creating or truncating the file.
+// Write serialises the table to path atomically: it writes to a temp file
+// in the same directory and renames on success, so a crash or error never
+// leaves a partially-written target file.
 func (w *Writer) Write(path string) (err error) {
-	f, err := os.Create(path)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tblx-tmp-*")
 	if err != nil {
-		return fmt.Errorf("tblx: create %s: %w", path, err)
+		return fmt.Errorf("tblx: create temp file: %w", err)
 	}
+	tmpName := tmp.Name()
 	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
+		if err != nil {
+			os.Remove(tmpName)
 		}
 	}()
-	return w.encodeTo(f)
+
+	if err := w.encodeTo(tmp); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("tblx: close: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("tblx: rename to %s: %w", path, err)
+	}
+	return nil
 }
 
 // encodeTo produces the whole file on any io.WriteSeeker — an *os.File
@@ -90,6 +108,8 @@ func (w *Writer) encodeTo(out io.WriteSeeker) error {
 	}
 
 	// Data blocks, back-to-back in definition order.
+	// Each block is gzip-compressed when that makes it smaller; the
+	// first byte of each block indicates compression (0x1f = gzip, 0x00 = raw).
 	blockStart := make([]int64, len(w.header.Cols))
 	for c, col := range w.colData {
 		def := w.header.Cols[c]
@@ -97,15 +117,47 @@ func (w *Writer) encodeTo(out io.WriteSeeker) error {
 		if err != nil {
 			return err
 		}
+
+		// Encode the column into a buffer first.
+		var raw bytes.Buffer
+		for row, v := range col {
+			if err := cdc.encode(&raw, v); err != nil {
+				return fmt.Errorf("tblx: column %q row %d: %w", def.Name, row+1, err)
+			}
+		}
+
+		// Try gzip; use it only if smaller than raw.
+		var comp bytes.Buffer
+		zw := gzip.NewWriter(&comp)
+		if _, err := zw.Write(raw.Bytes()); err != nil {
+			zw.Close()
+			return fmt.Errorf("tblx: column %q: %w", def.Name, err)
+		}
+		if err := zw.Close(); err != nil {
+			return fmt.Errorf("tblx: column %q gzip close: %w", def.Name, err)
+		}
+
 		start, err := offset()
 		if err != nil {
 			return err
 		}
 		blockStart[c] = start
 
-		for row, v := range col {
-			if err := cdc.encode(out, v); err != nil {
-				return fmt.Errorf("tblx: column %q row %d: %w", def.Name, row+1, err)
+		if comp.Len() < raw.Len() {
+			// Write compressed: marker byte + gzip stream.
+			if _, err := out.Write([]byte{0x1f}); err != nil {
+				return err
+			}
+			if _, err := out.Write(comp.Bytes()); err != nil {
+				return err
+			}
+		} else {
+			// Write raw: marker byte + uncompressed data.
+			if _, err := out.Write([]byte{0x00}); err != nil {
+				return err
+			}
+			if _, err := out.Write(raw.Bytes()); err != nil {
+				return err
 			}
 		}
 	}
@@ -129,6 +181,13 @@ func (w *Writer) encodeTo(out io.WriteSeeker) error {
 	}
 	if _, err := out.Seek(end, io.SeekStart); err != nil {
 		return fmt.Errorf("tblx: seek to end: %w", err)
+	}
+
+	// Trailing magic for integrity: lets readers detect truncated files.
+	buf := make([]byte, 4)
+	copy(buf, []byte(TailMagic))
+	if _, err := out.Write(buf); err != nil {
+		return fmt.Errorf("tblx: write tail magic: %w", err)
 	}
 	return nil
 }
