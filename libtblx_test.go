@@ -225,3 +225,40 @@ func TestCorruptLengthArrayDetected(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestRowIterator(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "iter.tblx")
+	w, err := NewWriter(
+		[]string{"name", "age"},
+		[]DataType{DTypeString, DTypeInt},
+		[][]any{{"Alice", "Bob", "Carol"}, {int64(30), int64(25), int64(35)}},
+	)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	it := r.Rows()
+	defer it.Close()
+
+	var names []string
+	for it.Next() {
+		row := it.Row()
+		names = append(names, row["name"].(string))
+	}
+	if it.Err() != nil {
+		t.Fatalf("iterator error: %v", it.Err())
+	}
+	want := []string{"Alice", "Bob", "Carol"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("names = %v, want %v", names, want)
+	}
+}

@@ -184,27 +184,83 @@ func (r *Reader) readBlock(colIndex int) ([]byte, error) {
 	}
 }
 
-// ReadAll decodes the whole table and transposes it into rows: each row
-// is a map from column name to value.
-func (r *Reader) ReadAll() ([]map[string]any, error) {
-	cols := make([][]any, r.NCols)
-	for i := range cols {
-		vals, err := r.ReadColumn(i)
-		if err != nil {
-			return nil, fmt.Errorf("tblx: read column %q: %w", r.ColNames[i], err)
-		}
-		cols[i] = vals
-	}
+// Rows returns an iterator that yields one row at a time as a map from
+// column name to value. Columns are read from disk once and held in
+// memory; rows are produced lazily without allocating the full result
+// slice up front. Use this instead of ReadAll for large tables.
+func (r *Reader) Rows() RowIterator {
+	return RowIterator{reader: r}
+}
 
-	rows := make([]map[string]any, r.NRows)
-	for ri := uint64(0); ri < r.NRows; ri++ {
-		m := make(map[string]any, r.NCols)
-		for ci := range cols {
-			m[r.ColNames[ci]] = cols[ci][ri]
-		}
-		rows[ri] = m
+// RowIterator iterates over table rows one at a time.
+type RowIterator struct {
+	reader   *Reader
+	cols     [][]any
+	row      uint64
+	err      error
+	finished bool
+}
+
+// Next advances to the next row. Returns false when all rows have been
+// consumed or on error. Call Err() after Next returns false to check
+// for errors.
+func (it *RowIterator) Next() bool {
+	if it.finished {
+		return false
 	}
-	return rows, nil
+	if it.cols == nil {
+		it.cols = make([][]any, it.reader.NCols)
+		for i := range it.cols {
+			vals, err := it.reader.ReadColumn(i)
+			if err != nil {
+				it.err = fmt.Errorf("tblx: read column %q: %w", it.reader.ColNames[i], err)
+				return false
+			}
+			it.cols[i] = vals
+		}
+	}
+	if it.row >= it.reader.NRows {
+		it.finished = true
+		return false
+	}
+	return true
+}
+
+// Row returns the current row as a map from column name to value.
+// Call Next() first. The returned map is valid until the next call to
+// Next().
+func (it *RowIterator) Row() map[string]any {
+	m := make(map[string]any, len(it.cols))
+	for ci, vals := range it.cols {
+		m[it.reader.ColNames[ci]] = vals[it.row]
+	}
+	it.row++
+	return m
+}
+
+// Err returns any error encountered during iteration.
+func (it *RowIterator) Err() error {
+	return it.err
+}
+
+// Close releases the column data held by the iterator. Call when done
+// iterating before all rows have been consumed.
+func (it *RowIterator) Close() {
+	it.cols = nil
+	it.finished = true
+}
+
+// ReadAll decodes the whole table and transposes it into rows: each row
+// is a map from column name to value. For large tables, use Rows()
+// instead to avoid allocating all rows at once.
+func (r *Reader) ReadAll() ([]map[string]any, error) {
+	it := r.Rows()
+	defer it.Close()
+	var rows []map[string]any
+	for it.Next() {
+		rows = append(rows, it.Row())
+	}
+	return rows, it.Err()
 }
 
 // Close releases the underlying file handle.
