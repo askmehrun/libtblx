@@ -114,7 +114,7 @@ func transpose(headers []string, rows [][]string) [][]string {
 // ---- meta --------------------------------------------------------------------
 
 //export tbl_version
-// tbl_version returns the Tablix library version, e.g. "0.2.2".
+// tbl_version returns the Tablix library version, e.g. "0.2.3".
 func tbl_version() *C.char { return cstr(tblx.Version) }
 
 //export tbl_last_error
