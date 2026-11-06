@@ -185,17 +185,104 @@ func (r *Reader) readBlock(colIndex int) ([]byte, error) {
 }
 
 // Rows returns an iterator that yields one row at a time as a map from
-// column name to value. Columns are read from disk once and held in
-// memory; rows are produced lazily without allocating the full result
-// slice up front. Use this instead of ReadAll for large tables.
+// column name to value, decoding each row on demand. Only the current row
+// and a small per-column read buffer are held, so peak memory is
+// independent of the row count. Use this instead of ReadAll for tables
+// too large to fit in memory.
+//
+// Iteration is sequential: Row() returns the next row in order. Random
+// access (jumping to a later row) re-decodes from the start, so it costs
+// O(row). Do not use the iterator concurrently with other Reader methods.
 func (r *Reader) Rows() RowIterator {
-	return RowIterator{reader: r}
+	it := RowIterator{reader: r}
+	if r.NCols > 0 {
+		it.cols = make([]*columnStream, int(r.NCols))
+		for c := 0; c < int(r.NCols); c++ {
+			cdc, err := codecFor(r.ColTypes[c])
+			if err != nil {
+				it.err = err
+				return it
+			}
+			it.cols[c] = &columnStream{r: r, c: c, dec: cdc}
+		}
+	}
+	return it
+}
+
+// columnByteReader serves one column's compressed block in place from the
+// file via ReadAt, so it never disturbs the file's shared offset and needs
+// no locking.
+type columnByteReader struct {
+	r      *Reader
+	off    int64
+	remain int64
+}
+
+func (c *columnByteReader) Read(b []byte) (int, error) {
+	if c.remain <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(b)) > c.remain {
+		b = b[:c.remain]
+	}
+	n, err := c.r.file.ReadAt(b, c.off)
+	c.off += int64(n)
+	c.remain -= int64(n)
+	return n, err
+}
+
+// streamColumn returns a reader positioned at the first value of column c,
+// decompressed, without loading the whole block into memory.
+func (r *Reader) streamColumn(c int) (io.Reader, error) {
+	if c < 0 || c >= int(r.NCols) {
+		return nil, fmt.Errorf("tblx: column index %d out of range [0, %d)", c, r.NCols)
+	}
+	off := r.colOffsets[c]
+	length := int64(r.colLens[c])
+	if off+length > r.fileSize {
+		return nil, fmt.Errorf("corrupt length array: column %d declares %d bytes at offset %d but file is only %d bytes", c, r.colLens[c], off, r.fileSize)
+	}
+	var marker [1]byte
+	if _, err := r.file.ReadAt(marker[:], off); err != nil {
+		return nil, fmt.Errorf("read block marker: %w", err)
+	}
+	body := &columnByteReader{r: r, off: off + 1, remain: length - 1}
+	switch marker[0] {
+	case 0x1f: // gzip
+		return gzip.NewReader(body)
+	case 0x00: // raw
+		return body, nil
+	default:
+		return nil, fmt.Errorf("unknown compression marker 0x%02x", marker[0])
+	}
+}
+
+// columnStream decodes one column's values one at a time, opening its
+// compressed block lazily on first use.
+type columnStream struct {
+	r     *Reader
+	c     int
+	dec   codec
+	src   io.Reader
+	ready bool
+}
+
+func (cs *columnStream) next() (any, error) {
+	if !cs.ready {
+		src, err := cs.r.streamColumn(cs.c)
+		if err != nil {
+			return nil, err
+		}
+		cs.src = src
+		cs.ready = true
+	}
+	return cs.dec.decode(cs.src)
 }
 
 // RowIterator iterates over table rows one at a time.
 type RowIterator struct {
 	reader   *Reader
-	cols     [][]any
+	cols     []*columnStream
 	row      uint64
 	err      error
 	finished bool
@@ -208,33 +295,28 @@ func (it *RowIterator) Next() bool {
 	if it.finished {
 		return false
 	}
-	if it.cols == nil {
-		it.cols = make([][]any, it.reader.NCols)
-		for i := range it.cols {
-			vals, err := it.reader.ReadColumn(i)
-			if err != nil {
-				it.err = fmt.Errorf("tblx: read column %q: %w", it.reader.ColNames[i], err)
-				return false
-			}
-			it.cols[i] = vals
-		}
-	}
 	if it.row >= it.reader.NRows {
 		it.finished = true
 		return false
 	}
+	it.row++
 	return true
 }
 
-// Row returns the current row as a map from column name to value.
-// Call Next() first. The returned map is valid until the next call to
-// Next().
+// Row returns the current row as a map from column name to value, decoded
+// on demand. Call Next() first. The returned map is valid until the next
+// call to Next().
 func (it *RowIterator) Row() map[string]any {
 	m := make(map[string]any, len(it.cols))
-	for ci, vals := range it.cols {
-		m[it.reader.ColNames[ci]] = vals[it.row]
+	for c, cs := range it.cols {
+		v, err := cs.next()
+		if err != nil {
+			it.err = fmt.Errorf("tblx: column %q row %d: %w", it.reader.ColNames[c], it.row, err)
+			it.finished = true
+			return m
+		}
+		m[it.reader.ColNames[c]] = v
 	}
-	it.row++
 	return m
 }
 
@@ -243,8 +325,8 @@ func (it *RowIterator) Err() error {
 	return it.err
 }
 
-// Close releases the column data held by the iterator. Call when done
-// iterating before all rows have been consumed.
+// Close releases resources held by the iterator. Safe to call after
+// iteration completes.
 func (it *RowIterator) Close() {
 	it.cols = nil
 	it.finished = true

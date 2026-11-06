@@ -262,3 +262,86 @@ func TestRowIterator(t *testing.T) {
 		t.Errorf("names = %v, want %v", names, want)
 	}
 }
+
+// TestRowIteratorEarlyStop verifies iteration can stop before the last row
+// (Close releases the per-column streams without a full table load).
+func TestRowIteratorEarlyStop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "iter_stop.tblx")
+	w, err := NewWriter(
+		[]string{"a"},
+		[]DataType{DTypeInt},
+		[][]any{{int64(1), int64(2), int64(3), int64(4), int64(5)}},
+	)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	it := r.Rows()
+	defer it.Close()
+	var got []int64
+	for it.Next() {
+		if len(got) == 2 {
+			break
+		}
+		got = append(got, it.Row()["a"].(int64))
+	}
+	if it.Err() != nil {
+		t.Fatalf("iterator error: %v", it.Err())
+	}
+	want := []int64{1, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("early-stop rows = %v, want %v", got, want)
+	}
+}
+
+// TestRowIteratorCorruptReported verifies a decode error on one row is
+// surfaced via Err() rather than crashing the loop.
+func TestRowIteratorCorruptReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "iter_corrupt.tblx")
+	w, err := NewWriter(
+		[]string{"a"},
+		[]DataType{DTypeString},
+		[][]any{{"x", "y", "z"}},
+	)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Corrupt the first string value's length prefix in place, keeping the
+	// file size (and trailing magic) intact so NewReader still opens it but
+	// the last row fails to decode.
+	data, _ := os.ReadFile(path)
+	// data block starts at offset 26; first byte is the gzip marker, so the
+	// first value's uint32 length prefix sits at 27.
+	binary.LittleEndian.PutUint32(data[27:], 1000)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	it := r.Rows()
+	defer it.Close()
+	for it.Next() {
+		it.Row()
+	}
+	if it.Err() == nil {
+		t.Fatal("expected a decode error from truncated file, got none")
+	}
+}
