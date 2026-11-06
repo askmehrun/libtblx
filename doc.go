@@ -41,4 +41,4 @@ const Magic = "TBLX"
 const TailMagic = "XLBT"
 
 // Version is the library / format revision.
-const Version = "1.0.0"
+const Version = "0.2.2"

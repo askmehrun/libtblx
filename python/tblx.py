@@ -187,7 +187,7 @@ _lib = _Lib()
 # ---------------------------------------------------------------------------
 
 def version() -> str:
-    """Version of the loaded Go core, e.g. "1.0.0"."""
+    """Version of the loaded Go core, e.g. "0.2.2"."""
     return _lib.take_str(_lib.c.tbl_version())
 
 
