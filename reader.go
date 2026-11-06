@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // Reader provides random, column-granular access to an open TBLX file.
 // NewReader parses only the header and the length array, so opening a
 // file is O(columns) regardless of row count; data is read lazily via
 // ReadColumn / ReadAll.
+//
+// Reader methods are safe for concurrent use.
 type Reader struct {
 	file     *os.File
 	ColNames []string
@@ -23,6 +26,8 @@ type Reader struct {
 	colLens     []uint64 // byte size of each column's data block
 	colOffsets  []int64  // absolute start offset of each column's data block
 	dataStart   int64    // absolute offset of the first data byte
+	fileSize    int64
+	mu          sync.Mutex
 }
 
 // NewReader opens path, validates the magic bytes and parses the header
@@ -70,6 +75,13 @@ func (r *Reader) init(path string) error {
 		return fmt.Errorf("tblx: seek: %w", err)
 	}
 	r.dataStart = pos
+
+	// Capture file size for length validation.
+	fi, err := r.file.Stat()
+	if err != nil {
+		return fmt.Errorf("tblx: stat: %w", err)
+	}
+	r.fileSize = fi.Size()
 
 	// Precompute absolute offsets so ReadColumn is O(1).
 	r.colOffsets = make([]int64, r.NCols)
@@ -137,11 +149,22 @@ func (r *Reader) ReadColumn(colIndex int) ([]any, error) {
 // readBlock seeks to a column's data block and returns the decompressed bytes.
 // The first byte is a compression marker: 0x1f = gzip, 0x00 = raw.
 func (r *Reader) readBlock(colIndex int) ([]byte, error) {
-	if _, err := r.file.Seek(r.colOffsets[colIndex], io.SeekStart); err != nil {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	off := r.colOffsets[colIndex]
+	length := r.colLens[colIndex]
+
+	// Validate declared block length against actual file size.
+	if off+int64(length) > r.fileSize {
+		return nil, fmt.Errorf("corrupt length array: column %d declares %d bytes at offset %d but file is only %d bytes", colIndex, length, off, r.fileSize)
+	}
+
+	if _, err := r.file.Seek(off, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("seek to column: %w", err)
 	}
 
-	block := make([]byte, r.colLens[colIndex])
+	block := make([]byte, length)
 	if _, err := io.ReadFull(r.file, block); err != nil {
 		return nil, fmt.Errorf("read block: %w", err)
 	}

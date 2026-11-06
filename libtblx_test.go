@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -151,5 +152,76 @@ func TestGuessTypes(t *testing.T) {
 	want := []DataType{DTypeInt, DTypeFloat, DTypeString, DTypeString}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GuessTypes = %v, want %v", got, want)
+	}
+}
+
+func TestConcurrentReadColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.tblx")
+	w, err := NewWriter(
+		[]string{"a", "b", "c"},
+		[]DataType{DTypeInt, DTypeFloat, DTypeString},
+		[][]any{
+			{int64(1), int64(2), int64(3)},
+			{1.0, 2.0, 3.0},
+			{"x", "y", "z"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(3)
+		go func(col int) { defer wg.Done(); _, _ = r.ReadColumn(col) }(0)
+		go func(col int) { defer wg.Done(); _, _ = r.ReadColumn(col) }(1)
+		go func(col int) { defer wg.Done(); _, _ = r.ReadColumn(col) }(2)
+	}
+	wg.Wait()
+}
+
+func TestCorruptLengthArrayDetected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.tblx")
+	w, err := NewWriter(
+		[]string{"a"},
+		[]DataType{DTypeInt},
+		[][]any{{int64(1), int64(2)}},
+	)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Write(path); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Corrupt the length array: read file, modify a length byte to be huge.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Header ends at col defs; find where length array starts by parsing.
+	// Magic(4) + rows(8) + cols(2) + coldef(name_len(1)+name+type(1)+flags(1))
+	// For "a": 1+1+1+1 = 4 bytes. So length array starts at 4+8+2+4 = 18.
+	lenOff := 18
+	binary.LittleEndian.PutUint64(data[lenOff:], ^uint64(0)) // max uint64
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewReader(path)
+	if err == nil {
+		t.Fatal("expected error for corrupt length array")
+	}
+	if !strings.Contains(err.Error(), "truncated") && !strings.Contains(err.Error(), "corrupt") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

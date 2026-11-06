@@ -42,6 +42,8 @@ import (
 
 // ---- handle registries ------------------------------------------------------
 
+const maxHandles = 1024
+
 var (
 	mu      sync.Mutex
 	readers = map[int64]*tblx.Reader{}
@@ -138,6 +140,10 @@ func tbl_free(p unsafe.Pointer) {
 func tbl_open(path *C.char) C.int64_t {
 	mu.Lock()
 	defer mu.Unlock()
+	if len(readers)+len(writers) >= maxHandles {
+		setErr(fmt.Errorf("tblx: handle limit reached (%d)", maxHandles))
+		return -1
+	}
 	r, err := tblx.NewReader(C.GoString(path))
 	if err != nil {
 		setErr(err)
@@ -388,6 +394,10 @@ func tbl_guess_types(csvPath *C.char) *C.char {
 func tbl_writer_new(nrows C.int64_t, ncols C.int32_t) C.int64_t {
 	mu.Lock()
 	defer mu.Unlock()
+	if len(readers)+len(writers) >= maxHandles {
+		setErr(fmt.Errorf("tblx: handle limit reached (%d)", maxHandles))
+		return -1
+	}
 	if int64(nrows) < 0 || int(ncols) <= 0 || int(ncols) > 0xFFFF {
 		setErr(fmt.Errorf("tblx: invalid table shape %d x %d", int64(nrows), int(ncols)))
 		return -1
