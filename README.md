@@ -102,4 +102,4 @@ See [wiki/Extending](https://github.com/askmehrun/tblx/wiki/Extending).
 
 ## License
 
-MIT
+AGPL v3
